@@ -6,6 +6,7 @@ import pytest
 
 from pingouin import pairwise_corr, read_dataset
 from pingouin.correlation import (
+    _polychoric_probs,
     bicor,
     corr,
     distance_corr,
@@ -494,6 +495,48 @@ class TestCorrelation(TestCase):
             assert np.isclose(float(mat.at[a, b]), pairs.at[i, "p_corr"], atol=1e-6)
         assert rcorr(data, method="polychoric").at["x1", "y1"] == "***"
         assert rcorr(data, method="polychoric", upper="n").at["x1", "y3"] == 73
+
+        # 7) No complete pair of observations: the contingency table is empty
+        rng = np.random.default_rng(123)
+        z = rng.multivariate_normal([0, 0], [[1, 0.5], [0.5, 1]], 100)
+        x, y = np.digitize(z[:, 0], [-0.5, 0.5]), np.digitize(z[:, 1], [0])
+        x_half, y_half = np.r_[x[:50], np.full(50, np.nan)], np.r_[np.full(50, np.nan), y[50:]]
+        with pytest.warns(UserWarning, match="at least two non-empty categories"):
+            stats = polychoric(x_half, y_half)
+        assert stats.at["polychoric", "n"] == 0
+        assert np.isnan(stats.at["polychoric", "r"])
+        assert stats.at["polychoric", "thresholds_x"].size == 0
+        # Same in rcorr, without affecting the other pairs
+        df_half = pd.DataFrame({"x": x_half, "y": y_half, "z": np.r_[y[:50], x[50:]]})
+        mat = rcorr(df_half, method="polychoric", stars=False, decimals=6)
+        assert np.isnan(float(mat.at["y", "x"])) and np.isnan(float(mat.at["x", "y"]))
+        assert np.isclose(
+            float(mat.at["z", "x"]), polychoric("x", "z", data=df_half).at["polychoric", "r"]
+        )
+        assert rcorr(df_half, method="polychoric", upper="n").at["x", "y"] == 0
+
+        # 8) Near-perfect association with a correction for the empty cells. The smallest cell
+        # probabilities are close to the precision of the bivariate normal CDF, and the Newton
+        # steps stall around 1e-11, i.e. all the iterations are used. The estimate must still be
+        # the maximum of the likelihood, with a standard error from its curvature.
+        t42 = np.array([[40, 0], [0, 38], [0, 42], [0, 23]])
+        stats = polychoric(table=t42, correction=0.5)
+        r, se = stats.at["polychoric", "r"], stats.at["polychoric", "se"]
+        assert 0.9 < r < 0.9999
+        t42_corr = np.where(t42 == 0, 0.5, t42)
+        tau_x, tau_y = (
+            stats.at["polychoric", "thresholds_x"],
+            stats.at["polychoric", "thresholds_y"],
+        )
+
+        def loglik(rho):
+            return np.sum(t42_corr * np.log(_polychoric_probs(tau_x, tau_y, rho)))
+
+        h = 1e-4
+        assert loglik(r) > max(loglik(r - h), loglik(r + h))
+        assert abs(loglik(r + h) - loglik(r - h)) / (2 * h) < 1e-3  # Score
+        info = -(loglik(r + h) - 2 * loglik(r) + loglik(r - h)) / h**2
+        assert np.isclose(se, 1 / np.sqrt(info), rtol=1e-3)
 
     def test_partial_corr(self):
         """Test function partial_corr.
