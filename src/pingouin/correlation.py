@@ -6,7 +6,8 @@ import pandas as pd
 import pandas_flavor as pf
 from scipy.optimize import minimize_scalar
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import kendalltau, multivariate_normal, norm, pearsonr, spearmanr
+from scipy.special import owens_t
+from scipy.stats import kendalltau, norm, pearsonr, spearmanr
 
 from .bayesian import bayesfactor_pearson
 from .config import _no_rounding
@@ -419,6 +420,26 @@ def _ordinal_crosstab(x, y):
     return table
 
 
+def _bvn_cdf(h, k, rho):
+    """Cumulative distribution function of the standard bivariate normal distribution.
+
+    This uses the closed-form expression based on Owen's T function (Owen 1956), which is
+    accurate to machine precision. By contrast, the accuracy and reproducibility of
+    :py:func:`scipy.stats.multivariate_normal.cdf` depend on the version of SciPy (e.g. randomized
+    integration with errors up to 1e-5 in SciPy 1.16).
+    """
+    h, k = h + 0.0, k + 0.0  # Avoid negative zeros
+    omr = np.sqrt(1 - rho**2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cdf = (
+            0.5 * (norm.cdf(h) + norm.cdf(k))
+            - owens_t(h, (k - rho * h) / (h * omr))
+            - owens_t(k, (h - rho * k) / (k * omr))
+            - np.where((h * k > 0) | ((h * k == 0) & (h + k >= 0)), 0, 0.5)
+        )
+    return np.where((h == 0) & (k == 0), 0.25 + np.arcsin(rho) / (2 * np.pi), cdf)
+
+
 def _polychoric_probs(a, b, rho, deriv=False):
     """Cell probabilities of a contingency table under a standard bivariate normal distribution.
 
@@ -438,9 +459,7 @@ def _polychoric_probs(a, b, rho, deriv=False):
         return grid[1:, 1:] - grid[:-1, 1:] - grid[1:, :-1] + grid[:-1, :-1]
 
     aa, bb = np.repeat(a, b.size), np.tile(b, a.size)
-    cdf = pad(
-        multivariate_normal.cdf(np.column_stack([aa, bb]), mean=[0, 0], cov=[[1, rho], [rho, 1]])
-    )
+    cdf = pad(_bvn_cdf(aa, bb, rho))
     # The bivariate CDF reduces to the univariate CDF when the other threshold is +inf
     cdf[1:-1, -1], cdf[-1, 1:-1], cdf[-1, -1] = norm.cdf(a), norm.cdf(b), 1
     probs = diff(cdf)

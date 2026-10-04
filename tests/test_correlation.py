@@ -3,9 +3,12 @@ from unittest import TestCase
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.integrate import quad
+from scipy.stats import norm
 
 from pingouin import pairwise_corr, read_dataset
 from pingouin.correlation import (
+    _bvn_cdf,
     _polychoric_probs,
     bicor,
     corr,
@@ -366,7 +369,6 @@ class TestCorrelation(TestCase):
             )
 
         # 5) Wald confidence interval and p-values, from the R estimates of the first dataset
-        from scipy.stats import norm
 
         rho, se = 0.54999592, 0.09381310
         stats = polychoric(x1, y1)
@@ -537,6 +539,24 @@ class TestCorrelation(TestCase):
         assert abs(loglik(r + h) - loglik(r - h)) / (2 * h) < 1e-3  # Score
         info = -(loglik(r + h) - 2 * loglik(r) + loglik(r - h)) / h**2
         assert np.isclose(se, 1 / np.sqrt(info), rtol=1e-3)
+
+        # 9) The bivariate normal CDF does not depend on the precision of SciPy's
+        # multivariate_normal.cdf, which is randomized with errors up to 1e-5 in SciPy 1.16.
+        # Compare to Phi(h) * Phi(k) plus the integral of the bivariate density from 0 to rho,
+        # including thresholds of zero and of opposite signs.
+        def bvn_quad(h, k, rho):
+            def pdf(t):
+                return np.exp(-(h**2 - 2 * t * h * k + k**2) / (2 * (1 - t**2))) / (
+                    2 * np.pi * np.sqrt(1 - t**2)
+                )
+
+            return norm.cdf(h) * norm.cdf(k) + quad(pdf, 0, rho)[0]
+
+        for h, k in [(0, 0), (0, 0.7), (0, -0.7), (-1.2, 0), (0.4, 1.3), (-0.4, 1.3), (-2, -0.5)]:
+            for rho in [-0.9, -0.3, 0, 0.5, 0.95]:
+                cdf = _bvn_cdf(np.array([h]), np.array([k]), rho)[0]
+                assert np.isclose(cdf, bvn_quad(h, k, rho), rtol=0, atol=1e-10)
+                assert np.isclose(cdf, _bvn_cdf(np.array([k]), np.array([h]), rho)[0], atol=1e-14)
 
     def test_partial_corr(self):
         """Test function partial_corr.
